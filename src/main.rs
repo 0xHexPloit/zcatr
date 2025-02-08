@@ -73,22 +73,23 @@ fn display_file_content<R>(file_name: &str, mut reader: R) where R: Read {
 
 
 fn print_tar_entry_content<R>(entry: tar::Entry<R>) where R: Read {
-    if entry.header().entry_type().is_dir() {
-        return;
-    }
-
     let path = entry.path().unwrap().into_owned();
-
-    if path.to_str().unwrap().contains("._") {
-        return;
-    }
-
     display_file_content(path.to_str().unwrap(), entry);
 }
 
 fn handle_tar_entries_from_tar_archive<R, F>(mut archive: tar::Archive<R>, handler: F) where R: Read, F: Fn(tar::Entry<R>) -> () {
     for entry in archive.entries().unwrap() {
         let entry = entry.unwrap();
+        let entry_header = entry.header();
+
+        if entry_header.entry_type().is_dir() {
+            continue;
+        }
+
+        if entry.path().unwrap().to_str().unwrap().contains("._") {
+            continue;
+        }
+
         handler(entry);
     }
 }
@@ -145,8 +146,6 @@ fn main() {
                 continue;
             }
         };
-
-        println!("{}", file_type);
 
         if args.list {
             match file_type {
