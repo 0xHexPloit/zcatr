@@ -100,6 +100,26 @@ fn handle_tar_entries<F>(path: PathBuf, handler: F) where F: Fn(tar::Entry<File>
 }
 
 
+fn print_zip_entry_content(file: zip::read::ZipFile) {
+    let path = file.name().to_owned();
+    display_file_content(&path, file);
+}
+
+
+fn handle_zip_entries(path: PathBuf, handler: fn(zip::read::ZipFile) -> ()) {
+    let file = File::open(path).unwrap();
+    let mut archive = zip::read::ZipArchive::new(file).unwrap();
+
+    for i in 0..archive.len() {
+        let file  = archive.by_index(i).unwrap();
+        if file.is_dir() {
+            continue;
+        }
+        handler(file);
+    }
+}
+
+
 fn main() {
     let args = Args::parse();
 
@@ -123,6 +143,7 @@ fn main() {
             }
         } else {
             match file_type {
+                "application/zip" => handle_zip_entries(file_path, print_zip_entry_content),
                 "application/x-tar" => handle_tar_entries(file_path, print_tar_entry_content),
                 "application/gzip" => {
                     let file = File::open(&file_path).unwrap();
