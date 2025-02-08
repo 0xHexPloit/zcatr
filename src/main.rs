@@ -106,6 +106,12 @@ fn display_file_content<R>(file_name: &str, mut reader: R) where R: Read {
 }
 
 
+fn print_tar_entry_info<R>(entry: tar::Entry<R>) where R: Read {
+    let path = entry.path().unwrap().into_owned();
+    let size = entry.header().size().unwrap();
+    display_file_info(path.to_str().unwrap(), size as usize);
+}
+
 fn print_tar_entry_content<R>(entry: tar::Entry<R>) where R: Read {
     let path = entry.path().unwrap().into_owned();
     display_file_content(path.to_str().unwrap(), entry);
@@ -189,6 +195,7 @@ fn main() {
             println!("📂 {file_path:?}");
             match file_type {
                 "application/zip" => handle_zip_entries(file_path, print_zip_entry_info),
+                "application/x-tar" => handle_tar_entries(file_path, print_tar_entry_info,),
                 _ =>  {
                     eprintln!("The following file type is not supported: {:?}", file_type);
                     std::process::exit(1);
