@@ -60,7 +60,7 @@ fn format_file_size(bytes: usize) -> String {
 fn display_file_info(file_name: &str, file_size: usize) {
     println!("|
 ├── File: {file_name}
-    Size: {}", format_file_size(file_size));
+|   Size: {}", format_file_size(file_size));
 }
 
 
