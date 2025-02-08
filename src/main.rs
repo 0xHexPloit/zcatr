@@ -468,3 +468,36 @@ fn main() {
         println!("");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_file_size() {
+        // Test bytes
+        assert_eq!(format_file_size(0), "0 Bytes");
+        assert_eq!(format_file_size(1), "1 Bytes");
+        assert_eq!(format_file_size(512), "512 Bytes");
+        assert_eq!(format_file_size(1023), "1023 Bytes");
+
+        // Test kilobytes
+        assert_eq!(format_file_size(1024), "1.00 KB");
+        assert_eq!(format_file_size(1500), "1.46 KB");
+        assert_eq!(format_file_size(1024 * 1024 - 1), "1024.00 KB");
+
+        // Test megabytes
+        assert_eq!(format_file_size(1024 * 1024), "1.00 MB");
+        assert_eq!(format_file_size(1024 * 1024 * 3/2 as usize), "1.50 MB");
+        assert_eq!(format_file_size(1024 * 1024 * 1024 - 1), "1024.00 MB");
+
+        // Test gigabytes
+        assert_eq!(format_file_size(1024 * 1024 * 1024), "1.00 GB");
+        assert_eq!(format_file_size(1024 * 1024 * 1024 * 2), "2.00 GB");
+        
+        // Test very large sizes (should cap at GB)
+        assert_eq!(format_file_size(1024 * 1024 * 1024 * 1024), "1024.00 GB");
+        assert_eq!(format_file_size(1024 * 1024 * 1024 * 1024 * 5), "5120.00 GB");
+
+    }
+}
