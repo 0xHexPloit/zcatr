@@ -30,6 +30,40 @@ fn infer_file_type(path: &PathBuf) -> Result<Option<Type>, Box<dyn Error>> {
   
 }
 
+
+fn format_file_size(bytes: usize) -> String {
+    if bytes == 0 {
+        return String::from("0 Bytes");
+    }
+    
+    const UNITS: [&str; 4] = ["Bytes", "KB", "MB", "GB"];
+    
+    let exp = (bytes as f64).ln() / 1024_f64.ln();
+    let i = exp.floor() as usize;
+    
+    if i >= UNITS.len() {
+        let value = bytes as f64 / 1024_f64.powi(3);
+        return format!("{:.2} {}", value, UNITS[3]);
+    }
+    
+    if i == 0 {
+        // For bytes, show without decimal places
+        return format!("{} {}", bytes, UNITS[0]);
+    }
+    
+    let value = bytes as f64 / 1024_f64.powi(i as i32);
+    format!("{:.2} {}", value, UNITS[i])
+}
+
+
+#[inline]
+fn display_file_info(file_name: &str, file_size: usize) {
+    println!("|
+├── File: {file_name}
+    Size: {}", format_file_size(file_size));
+}
+
+
 fn display_file_content<R>(file_name: &str, mut reader: R) where R: Read {
     println!("\n📄 Content from \"{}\":", file_name);
     println!("{}", "─".repeat(40));
@@ -101,6 +135,10 @@ fn handle_tar_entries<F>(path: PathBuf, handler: F) where F: Fn(tar::Entry<File>
 }
 
 
+fn print_zip_entry_info(file: zip::read::ZipFile) {
+    display_file_info(file.name(), file.size() as usize);
+}
+
 fn print_zip_entry_content(file: zip::read::ZipFile) {
     let path = file.name().to_owned();
     display_file_content(&path, file);
@@ -148,7 +186,9 @@ fn main() {
         };
 
         if args.list {
+            println!("📂 {file_path:?}");
             match file_type {
+                "application/zip" => handle_zip_entries(file_path, print_zip_entry_info),
                 _ =>  {
                     eprintln!("The following file type is not supported: {:?}", file_type);
                     std::process::exit(1);
@@ -174,5 +214,6 @@ fn main() {
                 }
             }
         }
+        println!("");
     }
 }
