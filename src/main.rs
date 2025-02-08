@@ -119,6 +119,17 @@ fn handle_zip_entries(path: PathBuf, handler: fn(zip::read::ZipFile) -> ()) {
     }
 }
 
+fn handle_bzip2_and_gzip_compressed_file<R>(file_path: PathBuf, reader: R) where R: Read {
+    if file_path.to_str().unwrap().contains("tar") {
+        let archive = tar::Archive::new(reader);
+        handle_tar_entries_from_tar_archive(archive, print_tar_entry_content);
+    } else {
+        let arr= file_path.to_str().unwrap().split(".gz").collect::<Vec<&str>>();
+        display_file_content(*arr.get(0).unwrap(), reader);
+    }
+}
+
+
 
 fn main() {
     let args = Args::parse();
@@ -148,14 +159,12 @@ fn main() {
                 "application/gzip" => {
                     let file = File::open(&file_path).unwrap();
                     let gz = GzDecoder::new(file);
-
-                    if file_path.to_str().unwrap().contains("tar") {
-                        let archive = tar::Archive::new(gz);
-                        handle_tar_entries_from_tar_archive(archive, print_tar_entry_content);
-                    } else {
-                        let arr= file_path.to_str().unwrap().split(".gz").collect::<Vec<&str>>();
-                        display_file_content(*arr.get(0).unwrap(), gz);
-                    }
+                    handle_bzip2_and_gzip_compressed_file(file_path, gz);
+                },
+                "application/x-bzip2" => {
+                    let file = File::open(&file_path).unwrap();
+                    let bz = bzip2::read::BzDecoder::new(file);
+                    handle_bzip2_and_gzip_compressed_file(file_path, bz);
                 },
                 _ => ()
             }
