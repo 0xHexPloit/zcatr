@@ -83,16 +83,20 @@ fn print_tar_entry_content<R>(entry: tar::Entry<R>) where R: Read {
         return;
     }
 
-
-
     display_file_content(path.to_str().unwrap(), entry);
 }
 
-fn handle_tar_entries_from_tar_archive<R>(mut archive: tar::Archive<R>, handler: fn(tar::Entry<R>) -> ()) where R: Read {
+fn handle_tar_entries_from_tar_archive<R, F>(mut archive: tar::Archive<R>, handler: F) where R: Read, F: Fn(tar::Entry<R>) -> () {
     for entry in archive.entries().unwrap() {
         let entry = entry.unwrap();
         handler(entry);
     }
+}
+
+fn handle_tar_entries<F>(path: PathBuf, handler: F) where F: Fn(tar::Entry<File>) -> () {
+    let file = File::open(path).unwrap();
+    let archive= tar::Archive::new(file);
+    handle_tar_entries_from_tar_archive(archive, handler);
 }
 
 
@@ -119,6 +123,7 @@ fn main() {
             }
         } else {
             match file_type {
+                "application/x-tar" => handle_tar_entries(file_path, print_tar_entry_content),
                 "application/gzip" => {
                     let file = File::open(&file_path).unwrap();
                     let gz = GzDecoder::new(file);
@@ -134,7 +139,5 @@ fn main() {
                 _ => ()
             }
         }
-
-
     }
 }
