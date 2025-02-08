@@ -149,7 +149,10 @@ fn main() {
 
         if args.list {
             match file_type {
-                _ => ()
+                _ =>  {
+                    eprintln!("The following file type is not supported: {:?}", file_type);
+                    std::process::exit(1);
+                }
             }
         } else {
             match file_type {
@@ -165,7 +168,10 @@ fn main() {
                     let bz = bzip2::read::BzDecoder::new(file);
                     handle_bzip2_and_gzip_compressed_file(file_path, bz);
                 },
-                _ => ()
+                _ => {
+                    eprintln!("The following file type is not supported: {:?}", file_type);
+                    std::process::exit(1);
+                }
             }
         }
     }
