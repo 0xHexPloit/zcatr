@@ -242,11 +242,7 @@ fn handle_tar_entries_from_tar_archive<R, F>(mut archive: tar::Archive<R>, handl
         if entry_header.entry_type().is_dir() {
             continue;
         }
-
-        if entry.path().unwrap().to_str().unwrap().contains("._") {
-            continue;
-        }
-
+        
         handler(entry);
     }
     Ok(())
@@ -414,10 +410,10 @@ fn main() {
             },
             Err(_) => {
                 eprintln!("Could not infer the type of the following file: {:?}", file_path);
-                continue;
+                std::process::exit(1);
             }
         };
-
+   
         if args.list {
             println!("📂 {file_path:?}");
             let output = match file_type {
@@ -441,6 +437,7 @@ fn main() {
 
             if output.is_err() {
                 eprintln!("An error occurred while processing the file: {:?}. Error: {:?}", file_path, output.err().unwrap());
+                std::process::exit(1);
             }
         } else {
             let output = match file_type {
@@ -463,6 +460,7 @@ fn main() {
             };
             if output.is_err() {
                 eprintln!("An error occurred while processing the file: {:?}. Error: {:?}", file_path, output.err().unwrap());
+                std::process::exit(1);
             }
         }
         println!("");
@@ -500,4 +498,371 @@ mod tests {
         assert_eq!(format_file_size(1024 * 1024 * 1024 * 1024 * 5), "5120.00 GB");
 
     }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use std::{fs::{self, File}, io::Write, path::PathBuf};
+
+    use assert_cmd::Command;
+    use flate2::write::GzEncoder;
+    use predicates::prelude::PredicateBooleanExt;
+    use tempfile::TempDir;
+    use predicates::prelude::*;
+
+    const TEST_MESSAGE: &str = "Hello, World!\nThis is a test file.\n";
+    const TAR_ARCHIVE_CONTENT: &[(&str, &str)] = &[
+        ("file1.txt", "Content of file 1"),
+        ("file2.txt", "Content of file 2")
+    ];
+
+    const ZIP_TEST_FILES: &[(&str, &str)] = &[
+        ("document.txt", "This is a plain text file.\nIt has multiple lines.\nTest content here."),
+        ("readme.md", "# Test Document\n## Section 1\nThis is a markdown file with **bold** and *italic* text.\n\n- List item 1\n- List item 2"),
+        ("data.csv", "id,name,value\n1,item1,100\n2,item2,200\n3,item3,300"),
+        ("config.json", "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\",\n  \"settings\": {\n    \"enabled\": true,\n    \"timeout\": 30\n  }\n}"),
+        ("data.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root>\n  <item id=\"1\">\n    <name>Test Item</name>\n    <value>100</value>\n  </item>\n</root>"),
+        ("config.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE configuration>\n<configuration>\n  <settings>\n    <setting name=\"timeout\" value=\"30\"/>\n  </settings>\n</configuration>")
+    ];
+
+    fn create_test_gz_file(dir: &TempDir, name: &str, content: &str) -> PathBuf {
+        let file_path = dir.path().join(name);
+        let file = File::create(&file_path).unwrap();
+        let mut encoder = GzEncoder::new(file, flate2::Compression::default());
+        encoder.write_all(content.as_bytes()).unwrap();
+        encoder.finish().unwrap();
+        file_path
+    }
+
+    fn create_tar_with_encoder<W>(files: &[(&str, &str)], encoder: W) -> W where W: Write {
+        let mut tar = tar::Builder::new(encoder);
+
+        for (file_name, file_content) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(file_content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, file_name, file_content.as_bytes()).unwrap();
+        }
+       tar.finish().unwrap();
+       tar.into_inner().unwrap()
+    }
+
+    fn create_test_tar_gz(dir: &TempDir, name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let file_path = dir.path().join(name);
+        let tar_gz = File::create(&file_path).unwrap();
+        let mut encoder = GzEncoder::new(tar_gz, flate2::Compression::default());
+        encoder = create_tar_with_encoder(files, encoder);
+        encoder.flush().unwrap();
+        encoder.finish().unwrap();
+        file_path
+    }
+
+    fn create_test_bz2_file(dir: &TempDir, name: &str, content: &str) -> PathBuf {
+        let file_path = dir.path().join(name);
+        let file = File::create(&file_path).unwrap();
+        let mut encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
+        encoder.write_all(content.as_bytes()).unwrap();
+        encoder.finish().unwrap();
+
+        file_path
+    }
+
+    fn create_test_tar_bz2_file(dir: &TempDir, name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let file_path = dir.path().join(name);
+        let file = File::create(&file_path).unwrap();
+        let mut encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
+        encoder = create_tar_with_encoder(files, encoder);
+        encoder.flush().unwrap();
+        encoder.finish().unwrap();
+        file_path
+    }
+
+    fn create_test_zip(dir: &TempDir, name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let file_path = dir.path().join(name);
+        let file = File::create(&file_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        
+        for &(file_name, file_content) in files {
+            zip.start_file(file_name, options).unwrap();
+            zip.write_all(file_content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        file_path
+    }
+
+    fn create_test_zip_with_dirs(dir: &TempDir, name: &str) -> PathBuf {
+        let file_path = dir.path().join(name);
+        let file = File::create(&file_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        zip.add_directory("empty_dir/", options).unwrap();
+        zip.add_directory("nested/", options).unwrap();
+        zip.start_file("root_file.txt", options).unwrap();
+        zip.write_all(b"Root level file\n").unwrap();
+        zip.start_file("nested/nested_file.txt", options).unwrap();
+        zip.write_all(b"Nested file content\n").unwrap();
+
+        zip.finish().unwrap();
+    
+        file_path
+    } 
+
+
+    #[test]
+    fn test_gz_file_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let gz_path = create_test_gz_file(&temp_dir, "text.txt.gz", TEST_MESSAGE);
+
+        let assert = Command::cargo_bin("zcatr").unwrap()
+            .arg(gz_path)
+            .assert();
+
+        assert.success().stdout(predicates::str::contains(TEST_MESSAGE));
+    }
+
+    #[test]
+    fn test_gz_file_info() {
+        let temp_dir = TempDir::new().unwrap();
+        let gz_path = create_test_gz_file(&temp_dir, "text.txt.gz", TEST_MESSAGE);
+
+        let assert = Command::cargo_bin("zcatr").unwrap()
+            .arg("--list")
+            .arg(gz_path)
+            .assert();
+
+        assert.success().stdout(predicates::str::contains("text.txt")).stdout(predicates::str::contains("Bytes"));
+    }
+
+    #[test]
+    fn test_tar_gz_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let tar_gz_path = create_test_tar_gz(&temp_dir, "test.tar.gz", TAR_ARCHIVE_CONTENT);
+
+        let assert = Command::cargo_bin("zcatr").unwrap().arg(tar_gz_path).assert();
+
+        assert.success().stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[0].1)).stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[1].1));
+    }
+
+    #[test]
+    fn test_tar_gz_info(){
+        let temp_dir = TempDir::new().unwrap();
+        let tar_gz_path = create_test_tar_gz(&temp_dir, "test.tar.gz", TAR_ARCHIVE_CONTENT);
+
+        let assert = Command::cargo_bin("zcatr")
+        .unwrap()
+        .arg("--list")
+        .arg(tar_gz_path)
+        .assert();
+
+        assert
+            .success()
+            .stdout(predicates::str::contains("file1.txt"))
+            .stdout(predicates::str::contains("file2.txt"))
+            .stdout(predicates::str::contains("Bytes"));
+    }
+
+    #[test]
+    fn test_non_existent_file() {
+        let assert = Command::cargo_bin("zcatr")
+        .unwrap()
+        .arg("nonexistent.gz")
+        .assert();
+
+        assert.failure().stderr(predicates::str::contains("Could not infer the type of the following file"));
+    }
+
+    #[test]
+    fn test_non_supported_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.text");
+        fs::write(&file_path, "Some dummy content").unwrap();
+
+        let assert = Command::cargo_bin("zcatr").unwrap().arg(file_path).assert();
+
+
+        assert.failure().stderr(predicates::str::contains("The following file type is not supported"));
+    }
+
+    #[test]
+    fn test_bz2_file_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let bz2_path = create_test_bz2_file(&temp_dir, "text.txt.bz2", TEST_MESSAGE);
+
+        let assert = Command::cargo_bin("zcatr").unwrap().arg(bz2_path).assert();
+
+        assert.success().stdout(predicates::str::contains(TEST_MESSAGE));
+    }
+
+
+    #[test]
+    fn test_bz2_file_info() {
+        let temp_dir = TempDir::new().unwrap();
+        let bz2_path = create_test_bz2_file(&temp_dir, "text.txt.bz2", TEST_MESSAGE);
+
+        let assert = Command::cargo_bin("zcatr").unwrap()
+            .arg("--list")
+            .arg(bz2_path)
+            .assert();
+
+        assert.success().stdout(predicates::str::contains("text.txt")).stdout(predicates::str::contains("Bytes"));
+    }
+
+    #[test] 
+    fn test_tar_bz2_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let tar_bz2_path = create_test_tar_bz2_file(&temp_dir, "test.tar.bz2", TAR_ARCHIVE_CONTENT);
+
+        println!("{:?}", tar_bz2_path);
+
+        let assert = Command::cargo_bin("zcatr").unwrap().arg(tar_bz2_path).assert();
+
+        assert.success().stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[0].1)).stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[1].1));
+    }
+
+    #[test]
+    fn test_zip_file_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let zip_path = create_test_zip(&temp_dir, "test.zip", ZIP_TEST_FILES);
+
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg(zip_path)
+            .assert();
+
+        // Test specific content from each file type
+        assert.success()
+            // Plain text content
+            .stdout(predicates::str::contains("This is a plain text file"))
+            // Markdown content
+            .stdout(predicates::str::contains("# Test Document"))
+            .stdout(predicates::str::contains("**bold** and *italic*"))
+            // CSV content
+            .stdout(predicates::str::contains("id,name,value"))
+            .stdout(predicates::str::contains("1,item1,100"))
+            // JSON content
+            .stdout(predicates::str::contains("\"version\": \"1.0.0\""))
+            // XML content
+            .stdout(predicates::str::contains("<item id=\"1\">"))
+            .stdout(predicates::str::contains("<configuration>"));
+    }
+
+    #[test]
+    fn test_mime_type_headers() {
+        let temp_dir = TempDir::new().unwrap();
+        let zip_path = create_test_zip(&temp_dir, "test.zip", ZIP_TEST_FILES);
+
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg(zip_path)
+            .assert();
+
+        // Verify file type recognition through header display
+        assert.success()
+            .stdout(predicates::str::contains("Content from \"document.txt\""))
+            .stdout(predicates::str::contains("Content from \"readme.md\""))
+            .stdout(predicates::str::contains("Content from \"data.csv\""))
+            .stdout(predicates::str::contains("Content from \"config.json\""))
+            .stdout(predicates::str::contains("Content from \"data.xml\""))
+            .stdout(predicates::str::contains("Content from \"config.xml\""));
+    }
+
+    #[test]
+    fn test_zip_with_directories() {
+        let temp_dir = TempDir::new().unwrap();
+        let zip_path = create_test_zip_with_dirs(&temp_dir, "test_with_dirs.zip");
+ 
+        // Test listing mode
+        let list_assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg("--list")
+            .arg(&zip_path)
+            .assert();
+
+        list_assert.success()
+            .stdout(predicates::str::contains("root_file.txt"))
+            .stdout(predicates::str::contains("nested/nested_file.txt"))
+            // Directory entries should be skipped
+            .stdout(predicates::str::contains("empty_dir").not());
+
+        // Test content mode
+        let content_assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg(&zip_path)
+            .assert();
+
+        content_assert.success()
+            .stdout(predicates::str::contains("Root level file"))
+            .stdout(predicates::str::contains("Nested file content")); 
+    }
+
+    #[test]
+    fn test_corrupted_zip() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("corrupted.zip");
+        let mut file = File::create(&file_path).unwrap();
+        
+        // Write some random bytes that look like a ZIP but are invalid
+        file.write_all(b"PK\x03\x04corrupted content").unwrap();
+
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg(file_path)
+            .assert();
+
+        assert.failure();
+    }
+
+    #[test]
+    fn test_zip_file_info() {
+        let temp_dir = TempDir::new().unwrap();
+        let zip_path = create_test_zip(&temp_dir, "test.zip", ZIP_TEST_FILES);
+
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg("--list")
+            .arg(zip_path)
+            .assert();
+
+        let stdout = String::from_utf8_lossy(assert.get_output().stdout.as_slice());
+
+        // Verify all file names are listed
+        for &(name, _) in ZIP_TEST_FILES {
+            assert!(predicates::str::contains(name).eval(&stdout));
+            assert!(predicates::str::contains("Bytes").eval(&stdout));
+        }
+    }
+
+    #[test]
+    fn test_no_preview_for_binary_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("mixed_content.zip");
+        let file = File::create(&file_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+
+        // Add binary files (should not be previewable)
+        zip.start_file("image.png", options).unwrap();
+        zip.write_all(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap(); // PNG header
+        
+        zip.start_file("binary.pdf", options).unwrap();
+        zip.write_all(b"%PDF-1.5\n%\x82\x82").unwrap(); // PDF header
+        
+        zip.start_file("program.exe", options).unwrap();
+        zip.write_all(&[0x4D, 0x5A, 0x90, 0x00]).unwrap(); // EXE header
+
+        zip.finish().unwrap();
+
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg(&file_path)
+            .assert();
+
+        assert.success()
+            // Binary files should show no preview message
+            .stdout(predicates::str::contains("Preview not available in console").count(3));
+    }
+
 }
