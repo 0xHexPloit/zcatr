@@ -1,4 +1,4 @@
-use std::{fs::File, io::{self, BufReader, Read}, path::PathBuf};
+use std::{fs::File, io::{self, BufReader, Read}, os::unix::fs::MetadataExt, path::PathBuf};
 
 use clap::Parser;
 use flate2::read::GzDecoder;
@@ -430,8 +430,10 @@ fn main() {
                     extract_and_display_info(&file_path, bz)
                 },
                 _ =>  {
-                    eprintln!("The following file type is not supported: {:?}", file_type);
-                    std::process::exit(1);
+                    let file_res = File::open(file_path.clone()).map_err(|err| ZcatError::IoError(err));
+                    file_res.map(|file| {
+                        display_file_info(&file_path.to_str().unwrap(), file.metadata().unwrap().size() as usize);
+                    })
                 }
             };
 
@@ -454,8 +456,13 @@ fn main() {
                     extract_and_display_content(&file_path, bz)
                 },
                 _ => {
-                    eprintln!("The following file type is not supported: {:?}", file_type);
-                    std::process::exit(1);
+                    let file_res = File::open(file_path.clone()).map_err(|err| ZcatError::IoError(err));
+                    file_res.map(|file| {
+                        display_file_content(
+                            &file_path.clone().to_str().unwrap(),
+                            BufReader::new(file)
+                        )
+                    })             
                 }
             };
             if output.is_err() {
@@ -502,7 +509,7 @@ mod tests {
 
 #[cfg(test)]
 mod integration_tests {
-    use std::{fs::{self, File}, io::Write, path::PathBuf};
+    use std::{fs::{self, File}, io::Write, os::unix::fs::MetadataExt, path::PathBuf};
 
     use assert_cmd::Command;
     use flate2::write::GzEncoder;
@@ -672,18 +679,6 @@ mod integration_tests {
         .assert();
 
         assert.failure().stderr(predicates::str::contains("Could not infer the type of the following file"));
-    }
-
-    #[test]
-    fn test_non_supported_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.text");
-        fs::write(&file_path, "Some dummy content").unwrap();
-
-        let assert = Command::cargo_bin("zcatr").unwrap().arg(file_path).assert();
-
-
-        assert.failure().stderr(predicates::str::contains("The following file type is not supported"));
     }
 
     #[test]
@@ -863,6 +858,42 @@ mod integration_tests {
         assert.success()
             // Binary files should show no preview message
             .stdout(predicates::str::contains("Preview not available in console").count(3));
+    }
+
+    #[test]
+    fn test_it_should_display_the_content_of_a_simple_text_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("dummy.txt");
+        let dummy_text = "THIS IS A DUMMY TEXT";
+        File::create(file_path.clone()).unwrap().write_all(dummy_text.as_bytes()).unwrap();
+
+        let assert = Command::cargo_bin("zcatr")
+        .unwrap()
+        .arg(&file_path.clone())
+        .assert();
+
+        assert.success().stdout(predicates::str::contains(dummy_text));
+
+        fs::remove_file(file_path).unwrap();
+    }
+
+    #[test]
+    fn test_it_should_display_the_size_of_a_simple_text_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("dummy.txt");
+        let dummy_text = "THIS IS A DUMMY TEXT";
+        let mut file = File::create(file_path.clone()).unwrap();
+        file.write_all(dummy_text.as_bytes()).unwrap();
+
+        let assert = Command::cargo_bin("zcatr")
+        .unwrap()
+        .arg("-l")
+        .arg(&file_path.clone())
+        .assert();
+
+        assert.success().stdout(predicates::str::contains(format!("{} Bytes", file.metadata().unwrap().size())));
+
+        fs::remove_file(file_path).unwrap();
     }
 
 }
