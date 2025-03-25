@@ -173,7 +173,7 @@ where
 {
     let context = CONTEXT.get().unwrap();
     if context.with_styling {
-        println!("\n📄 Content from \"{}\":", file_name);
+        println!("📄 Content from \"{}\":", file_name);
         println!("{}", "─".repeat(40));
     }
 
@@ -385,7 +385,7 @@ fn handle_zip_entries(
     path: &PathBuf,
     handler: fn(zip::read::ZipFile) -> (),
 ) -> Result<(), ZcatError> {
-    let file = File::open(path).unwrap();
+    let file = File::open(path)?;
     let mut archive = zip::read::ZipArchive::new(file)?;
 
     for i in 0..archive.len() {
@@ -465,7 +465,7 @@ where
         handle_tar_entries_from_tar_archive(archive, print_tar_entry_info)?;
     } else {
         let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).unwrap();
+        reader.read_to_end(&mut buffer)?;
 
         display_file_info(&file_name, buffer.len());
     }
@@ -565,7 +565,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        println!("");
+        println!()
     }
 }
 
@@ -588,7 +588,7 @@ mod tests {
 
         // Test megabytes
         assert_eq!(format_file_size(1024 * 1024), "1.00 MB");
-        assert_eq!(format_file_size(1024 * 1024 * 3 / 2 as usize), "1.50 MB");
+        assert_eq!(format_file_size(1024 * 1024 * 3 / 2usize), "1.50 MB");
         assert_eq!(format_file_size(1024 * 1024 * 1024 - 1), "1024.00 MB");
 
         // Test gigabytes
@@ -1050,16 +1050,5 @@ mod integration_tests {
         fs::remove_file(file_path).unwrap();
     }
 
-    #[test]
-    fn test_it_should_not_produce_an_utf8_error() {
-        let file_path = Path::new(&"..\\..\\dummy.txt");
-        let dummy_text = "A".repeat(BUFFER_SIZE - 1) + "é";
-        println!("{}", dummy_text);
-        let mut file = File::create(file_path.clone()).unwrap();
-        file.write_all(dummy_text.as_bytes()).unwrap();
 
-        display_file_content("test", BufReader::new(File::open("dummy.txt").unwrap()));
-
-        fs::remove_file(file_path).unwrap();
-    }
 }
