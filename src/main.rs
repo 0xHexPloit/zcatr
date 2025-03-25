@@ -19,6 +19,8 @@ const LINE_ENDING: &str = "\n";
 const MAGIC_BYTES_SIZE: usize = 512;
 const BUFFER_SIZE: usize = 8192;
 
+const UTF_8_PARSING_ERR_MESSAGE: &'static str = "[Error: Invalid UTF-8 sequence encountered]";
+
 #[derive(Error, Debug)]
 enum ZcatError {
     #[error("I/O error: {0}")]
@@ -177,50 +179,56 @@ where
         println!("{}", "─".repeat(40));
     }
 
-    let mut magic_bytes_buffer = [0u8; MAGIC_BYTES_SIZE];
-    let magic_bytes_read = reader.read(&mut magic_bytes_buffer).unwrap();
-    let magic_bytes = &magic_bytes_buffer[..magic_bytes_read];
+    let mut buffer = [0u8; BUFFER_SIZE];
+    let mut read_bytes = reader.read(&mut buffer[..MAGIC_BYTES_SIZE]).unwrap();
+    let magic_bytes = &buffer[..read_bytes];
 
     let mut printing_handler = move || {
-        // Create a cursor for the magic bytes
-        let mut magic_cursor = io::Cursor::new(magic_bytes);
-
-        // Read from the magic bytes first
-        let mut buffer = [0; BUFFER_SIZE];
-        let mut read_bytes = magic_cursor.read(&mut buffer).unwrap_or(0);
+        let mut cursor = std::io::Cursor::new(magic_bytes);
+        read_bytes = cursor.read(&mut buffer).unwrap();
 
         // Stream the content
-        while read_bytes > 0 {
+        loop {
             // Replacing cursor to avoid a UTF8 parsing error.
-            let mut new_n_positions = read_bytes;
-
+            let mut right_ptr = read_bytes - 1;
+            let mut inspected_byte = 0;
             loop {
-                let byte = buffer[new_n_positions - 1];
-                if byte >> 7 == 0x0 || byte >> 5 == 0x6 || byte >> 4 == 0xE || byte >> 3 == 30 {
+                inspected_byte = buffer[right_ptr];
+                if inspected_byte >> 7 == 0x0 || inspected_byte >> 5 == 0x6 || inspected_byte >> 4 == 0xE || inspected_byte >> 3 == 30 {
                     break;
                 }
-                new_n_positions -= 1;
+                right_ptr -= 1;
             }
 
-            if new_n_positions != read_bytes {
-                new_n_positions += 1;
+            let str_res  = match inspected_byte >> 7 == 0 {
+                true => std::str::from_utf8(&buffer[..right_ptr+1]),
+                false => std::str::from_utf8(&buffer[..right_ptr]),
+            };
+
+            match str_res {
+                Ok(text) => {
+                    print!("{}", text);
+                },
+                Err(_) => {
+                    eprintln!("{}", UTF_8_PARSING_ERR_MESSAGE);
+                    break;
+                }
             }
 
-            if let Ok(text) = std::str::from_utf8(&buffer[..new_n_positions]) {
-                print!("{}", text);
-            } else {
-                println!("[Error: Invalid UTF-8 sequence encountered]");
+            let mut offset = 0;
+
+            if inspected_byte >> 7 != 0 {
+                buffer.copy_within(right_ptr..read_bytes, 0);
+                offset = read_bytes - right_ptr;
+            }
+
+            read_bytes = reader.read(&mut buffer[offset..]).unwrap_or(0);
+
+            if read_bytes == 0 {
                 break;
             }
 
-            // Checking if we should replace the file cursor
-            if new_n_positions != read_bytes {
-                // Adjust the reader's position to continue reading from the new position
-                buffer.copy_within(new_n_positions..read_bytes, 0);
-            }
-
-            // Read from the original reader
-            read_bytes = reader.read(&mut buffer[read_bytes - new_n_positions..]).unwrap_or(0);
+            read_bytes += offset;
         }
     };
 
@@ -608,8 +616,8 @@ mod tests {
 mod integration_tests {
     use std::{
         fs::{self, File},
-        io::{BufReader, Write},
-        path::{Path, PathBuf},
+        io::{Write},
+        path::{PathBuf},
     };
 
     use assert_cmd::Command;
@@ -618,7 +626,7 @@ mod integration_tests {
     use predicates::prelude::*;
     use tempfile::TempDir;
 
-    use crate::{display_file_content, BUFFER_SIZE};
+    use crate::{BUFFER_SIZE, LINE_ENDING, UTF_8_PARSING_ERR_MESSAGE};
 
     const TEST_MESSAGE: &str = "Hello, World!\nThis is a test file.\n";
     const TAR_ARCHIVE_CONTENT: &[(&str, &str)] = &[
@@ -1050,5 +1058,49 @@ mod integration_tests {
         fs::remove_file(file_path).unwrap();
     }
 
+
+    #[test]
+    fn test_it_should_mimic_how_the_cat_command_works() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("dummy.txt");
+        let dummy_text = "THIS IS A DUMMY TEXT";
+        let mut file = File::create(file_path.clone()).unwrap();
+        file.write_all(dummy_text.as_bytes()).unwrap();
+        let file_path_two = temp_dir.path().join("dummy2.txt");
+        let dummy_text_two = "THIS IS A SECOND DUMMY TEXT";
+        let mut file_two = File::create(file_path_two.clone()).unwrap();
+        file_two.write_all(dummy_text_two.as_bytes()).unwrap();
+
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg("--no-styling")
+            .arg(&file_path.clone())
+            .arg(&file_path_two.clone())
+            .assert();
+
+        assert.success().stdout(predicates::str::contains(format!("{}{}{}", dummy_text, LINE_ENDING ,dummy_text_two)));
+
+        fs::remove_file(file_path).unwrap();
+        fs::remove_file(file_path_two).unwrap();
+    }
+
+    #[test]
+    fn test_it_should_not_produce_an_utf8_parsing_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("dummy.txt");
+        let dummy_text = "A".repeat(BUFFER_SIZE-1) + "é";
+        let mut file = File::create(file_path.clone()).unwrap();
+        file.write_all(dummy_text.as_bytes()).unwrap();
+
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg("--no-styling")
+            .arg(&file_path.clone())
+            .assert();
+
+        assert.success().stdout(predicates::str::contains(UTF_8_PARSING_ERR_MESSAGE).not());
+
+        fs::remove_file(file_path).unwrap();
+    }
 
 }
