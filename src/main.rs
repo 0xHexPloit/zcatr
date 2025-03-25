@@ -1,7 +1,8 @@
 use std::{
     fs::File,
     io::{self, BufReader, Read},
-    path::PathBuf, sync::OnceLock,
+    path::PathBuf,
+    sync::OnceLock,
 };
 
 use clap::Parser;
@@ -77,7 +78,7 @@ struct Context {
 
 static CONTEXT: OnceLock<Context> = OnceLock::new();
 
-/// Determines the MIME type of a file using file signature detection.
+/// Determines the MIME type of file using file signature detection.
 ///
 /// This function examines the file's content to identify its type based on magic bytes,
 /// rather than relying on file extensions. It uses the `infer` crate for detection.
@@ -179,21 +180,47 @@ where
     let mut magic_bytes_buffer = [0u8; MAGIC_BYTES_SIZE];
     let magic_bytes_read = reader.read(&mut magic_bytes_buffer).unwrap();
     let magic_bytes = &magic_bytes_buffer[..magic_bytes_read];
-    let printing_handler = move || {
-        let mut reader = BufReader::new(io::Cursor::new(magic_bytes).chain(reader));
+
+    let mut printing_handler = move || {
+        // Create a cursor for the magic bytes
+        let mut magic_cursor = io::Cursor::new(magic_bytes);
+
+        // Read from the magic bytes first
         let mut buffer = [0; BUFFER_SIZE];
+        let mut read_bytes = magic_cursor.read(&mut buffer).unwrap_or(0);
 
         // Stream the content
-        while let Ok(n) = reader.read(&mut buffer) {
-            if n == 0 {
-                break;
+        while read_bytes > 0 {
+            // Replacing cursor to avoid a UTF8 parsing error.
+            let mut new_n_positions = read_bytes;
+
+            loop {
+                let byte = buffer[new_n_positions - 1];
+                if byte >> 7 == 0x0 || byte >> 5 == 0x6 || byte >> 4 == 0xE || byte >> 3 == 30 {
+                    break;
+                }
+                new_n_positions -= 1;
             }
-            if let Ok(text) = std::str::from_utf8(&buffer[..n]) {
+
+            if new_n_positions != read_bytes {
+                new_n_positions += 1;
+            }
+
+            if let Ok(text) = std::str::from_utf8(&buffer[..new_n_positions]) {
                 print!("{}", text);
             } else {
                 println!("[Error: Invalid UTF-8 sequence encountered]");
                 break;
             }
+
+            // Checking if we should replace the file cursor
+            if new_n_positions != read_bytes {
+                // Adjust the reader's position to continue reading from the new position
+                buffer.copy_within(new_n_positions..read_bytes, 0);
+            }
+
+            // Read from the original reader
+            read_bytes = reader.read(&mut buffer[read_bytes - new_n_positions..]).unwrap_or(0);
         }
     };
 
@@ -448,7 +475,11 @@ where
 fn main() {
     let args = Args::parse();
 
-    CONTEXT.set(Context { with_styling: !args.no_styling }).unwrap();
+    CONTEXT
+        .set(Context {
+            with_styling: !args.no_styling,
+        })
+        .unwrap();
 
     for file_path in args.files {
         let file_type = match infer_file_type(&file_path) {
@@ -577,8 +608,8 @@ mod tests {
 mod integration_tests {
     use std::{
         fs::{self, File},
-        io::Write,
-        path::PathBuf,
+        io::{BufReader, Write},
+        path::{Path, PathBuf},
     };
 
     use assert_cmd::Command;
@@ -586,6 +617,8 @@ mod integration_tests {
     use predicates::prelude::PredicateBooleanExt;
     use predicates::prelude::*;
     use tempfile::TempDir;
+
+    use crate::{display_file_content, BUFFER_SIZE};
 
     const TEST_MESSAGE: &str = "Hello, World!\nThis is a test file.\n";
     const TAR_ARCHIVE_CONTENT: &[(&str, &str)] = &[
@@ -996,7 +1029,6 @@ mod integration_tests {
         fs::remove_file(file_path).unwrap();
     }
 
-
     #[test]
     fn test_it_should_not_display_header_and_footer_when_printing_file_content() {
         let temp_dir = TempDir::new().unwrap();
@@ -1011,7 +1043,22 @@ mod integration_tests {
             .arg(&file_path.clone())
             .assert();
 
-        assert.success().stdout(predicates::str::contains("📄").not());
+        assert
+            .success()
+            .stdout(predicates::str::contains("📄").not());
+
+        fs::remove_file(file_path).unwrap();
+    }
+
+    #[test]
+    fn test_it_should_not_produce_an_utf8_error() {
+        let file_path = Path::new(&"..\\..\\dummy.txt");
+        let dummy_text = "A".repeat(BUFFER_SIZE - 1) + "é";
+        println!("{}", dummy_text);
+        let mut file = File::create(file_path.clone()).unwrap();
+        file.write_all(dummy_text.as_bytes()).unwrap();
+
+        display_file_content("test", BufReader::new(File::open("dummy.txt").unwrap()));
 
         fs::remove_file(file_path).unwrap();
     }
