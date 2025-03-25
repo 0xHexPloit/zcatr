@@ -1,4 +1,8 @@
-use std::{fs::File, io::{self, BufReader, Read}, os::unix::fs::MetadataExt, path::PathBuf};
+use std::{
+    fs::File,
+    io::{self, BufReader, Read},
+    path::PathBuf, sync::OnceLock,
+};
 
 use clap::Parser;
 use flate2::read::GzDecoder;
@@ -14,7 +18,6 @@ const LINE_ENDING: &str = "\n";
 const MAGIC_BYTES_SIZE: usize = 512;
 const BUFFER_SIZE: usize = 8192;
 
-
 #[derive(Error, Debug)]
 enum ZcatError {
     #[error("I/O error: {0}")]
@@ -22,7 +25,6 @@ enum ZcatError {
     #[error("ZIP error: {0}")]
     ZipError(#[from] zip::result::ZipError),
 }
-
 
 #[derive(Parser, Debug)]
 #[command(
@@ -46,6 +48,14 @@ struct Args {
     list: bool,
 
     #[arg(
+        short,
+        long,
+        action,
+        help = "When printing the content of the file(s), the header and the footer are not displayed!"
+    )]
+    no_styling: bool,
+
+    #[arg(
         required = true,
         help = "Files to read",
         value_name = "FILES",
@@ -57,9 +67,15 @@ struct Args {
         - TAR+GZIP archives (.tar.gz, .tgz)\n\
         - TAR+BZIP2 archives (.tar.bz2)"
     )]
-    files: Vec<PathBuf>
+    files: Vec<PathBuf>,
 }
 
+#[derive(Debug)]
+struct Context {
+    with_styling: bool,
+}
+
+static CONTEXT: OnceLock<Context> = OnceLock::new();
 
 /// Determines the MIME type of a file using file signature detection.
 ///
@@ -78,14 +94,13 @@ struct Args {
 fn infer_file_type(path: &PathBuf) -> Result<Option<Type>, ZcatError> {
     let mime_type = infer::get_from_path(path.as_path())?;
     Ok(mime_type)
-  
 }
 
 /// Formats file size in human-readable format
-/// 
+///
 /// # Arguments
 /// * `bytes` - Size in bytes to format
-/// 
+///
 /// # Returns
 /// A string representation of the size with appropriate unit
 #[inline]
@@ -93,26 +108,25 @@ fn format_file_size(bytes: usize) -> String {
     if bytes == 0 {
         return String::from("0 Bytes");
     }
-    
+
     const UNITS: [&str; 4] = ["Bytes", "KB", "MB", "GB"];
-    
+
     let exp = (bytes as f64).ln() / 1024_f64.ln();
     let i = exp.floor() as usize;
-    
+
     if i >= UNITS.len() {
         let value = bytes as f64 / 1024_f64.powi(3);
         return format!("{:.2} {}", value, UNITS[3]);
     }
-    
+
     if i == 0 {
         // For bytes, show without decimal places
         return format!("{} {}", bytes, UNITS[0]);
     }
-    
+
     let value = bytes as f64 / 1024_f64.powi(i as i32);
     format!("{:.2} {}", value, UNITS[i])
 }
-
 
 /// Displays formatted information about a file in a tree-like structure.
 ///
@@ -125,9 +139,12 @@ fn format_file_size(bytes: usize) -> String {
 /// * `file_size` - The size of the file in bytes
 #[inline]
 fn display_file_info(file_name: &str, file_size: usize) {
-    println!("|
+    println!(
+        "|
 ├── File: {file_name}
-|   Size: {}", format_file_size(file_size));
+|   Size: {}",
+        format_file_size(file_size)
+    );
 }
 
 /// Displays the content of a file with formatted header and footer.
@@ -149,10 +166,15 @@ fn display_file_info(file_name: &str, file_size: usize) {
 /// [actual file content here]
 /// ────────────────────────────────
 /// ```
-fn display_file_content<R>(file_name: &str, mut reader: R) where R: Read {
-    println!("\n📄 Content from \"{}\":", file_name);
-    println!("{}", "─".repeat(40));
-
+fn display_file_content<R>(file_name: &str, mut reader: R)
+where
+    R: Read,
+{
+    let context = CONTEXT.get().unwrap();
+    if context.with_styling {
+        println!("\n📄 Content from \"{}\":", file_name);
+        println!("{}", "─".repeat(40));
+    }
 
     let mut magic_bytes_buffer = [0u8; MAGIC_BYTES_SIZE];
     let magic_bytes_read = reader.read(&mut magic_bytes_buffer).unwrap();
@@ -160,10 +182,12 @@ fn display_file_content<R>(file_name: &str, mut reader: R) where R: Read {
     let printing_handler = move || {
         let mut reader = BufReader::new(io::Cursor::new(magic_bytes).chain(reader));
         let mut buffer = [0; BUFFER_SIZE];
-        
+
         // Stream the content
         while let Ok(n) = reader.read(&mut buffer) {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             if let Ok(text) = std::str::from_utf8(&buffer[..n]) {
                 print!("{}", text);
             } else {
@@ -172,12 +196,13 @@ fn display_file_content<R>(file_name: &str, mut reader: R) where R: Read {
             }
         }
     };
-    
+
     match infer::get(magic_bytes) {
         Some(mime_type) => match mime_type.mime_type() {
-            "text/plain" | "text/markdown" | "text/csv" | "application/json" | "application/xml" | "text/xml" => {
+            "text/plain" | "text/markdown" | "text/csv" | "application/json"
+            | "application/xml" | "text/xml" => {
                 printing_handler();
-            },
+            }
             _ => {
                 print!("Preview not available in console.")
             }
@@ -185,11 +210,12 @@ fn display_file_content<R>(file_name: &str, mut reader: R) where R: Read {
         None => {
             printing_handler();
         }
-    } 
-    
-    println!("{}{}", LINE_ENDING, "─".repeat(40));
-}
+    }
 
+    if context.with_styling {
+        println!("{}{}", LINE_ENDING, "─".repeat(40));
+    }
+}
 
 /// Prints information about a single entry within a TAR archive.
 ///
@@ -199,7 +225,10 @@ fn display_file_content<R>(file_name: &str, mut reader: R) where R: Read {
 ///
 /// # Arguments
 /// * `entry` - A TAR entry implementing the `Read` trait
-fn print_tar_entry_info<R>(entry: tar::Entry<R>) where R: Read {
+fn print_tar_entry_info<R>(entry: tar::Entry<R>)
+where
+    R: Read,
+{
     let path = entry.path().unwrap().into_owned();
     let size = entry.header().size().unwrap();
     display_file_info(path.to_str().unwrap(), size as usize);
@@ -212,7 +241,10 @@ fn print_tar_entry_info<R>(entry: tar::Entry<R>) where R: Read {
 ///
 /// # Arguments
 /// * `entry` - A TAR entry implementing the `Read` trait
-fn print_tar_entry_content<R>(entry: tar::Entry<R>) where R: Read {
+fn print_tar_entry_content<R>(entry: tar::Entry<R>)
+where
+    R: Read,
+{
     let path = entry.path().unwrap().into_owned();
     display_file_content(path.to_str().unwrap(), entry);
 }
@@ -234,7 +266,14 @@ fn print_tar_entry_content<R>(entry: tar::Entry<R>) where R: Read {
 /// # Errors
 /// This function can return:
 /// * `ZcatError::TarError` - If there's an error reading entries from the archive
-fn handle_tar_entries_from_tar_archive<R, F>(mut archive: tar::Archive<R>, handler: F) -> Result<(), ZcatError> where R: Read, F: Fn(tar::Entry<R>) -> () {
+fn handle_tar_entries_from_tar_archive<R, F>(
+    mut archive: tar::Archive<R>,
+    handler: F,
+) -> Result<(), ZcatError>
+where
+    R: Read,
+    F: Fn(tar::Entry<R>) -> (),
+{
     for entry in archive.entries()? {
         let entry = entry?;
         let entry_header = entry.header();
@@ -242,12 +281,11 @@ fn handle_tar_entries_from_tar_archive<R, F>(mut archive: tar::Archive<R>, handl
         if entry_header.entry_type().is_dir() {
             continue;
         }
-        
+
         handler(entry);
     }
     Ok(())
 }
-
 
 /// Applies a handler function to each file entry in a TAR archive file.
 ///
@@ -266,13 +304,15 @@ fn handle_tar_entries_from_tar_archive<R, F>(mut archive: tar::Archive<R>, handl
 /// This function can return:
 /// * `ZcatError::IoError` - If there's an error opening or reading the file
 /// * `ZcatError::TarError` - If there's an error processing the TAR archive
-fn handle_tar_entries<F>(path: &PathBuf, handler: F) -> Result<(), ZcatError> where F: Fn(tar::Entry<File>) -> () {
+fn handle_tar_entries<F>(path: &PathBuf, handler: F) -> Result<(), ZcatError>
+where
+    F: Fn(tar::Entry<File>) -> (),
+{
     let file = File::open(path)?;
-    let archive= tar::Archive::new(file);
+    let archive = tar::Archive::new(file);
     handle_tar_entries_from_tar_archive(archive, handler)?;
     Ok(())
 }
-
 
 /// Displays formatted information about a single file within a ZIP archive.
 ///
@@ -285,7 +325,6 @@ fn print_zip_entry_info(file: zip::read::ZipFile) {
     display_file_info(file.name(), file.size() as usize);
 }
 
-
 /// Displays the content of a single file within a ZIP archive.
 ///
 /// Takes a ZIP file entry and displays its content using the `display_file_content` function.
@@ -297,7 +336,6 @@ fn print_zip_entry_content(file: zip::read::ZipFile) {
     let path = file.name().to_owned();
     display_file_content(&path, file);
 }
-
 
 /// Processes entries in a ZIP archive with a provided handler function.
 ///
@@ -316,12 +354,15 @@ fn print_zip_entry_content(file: zip::read::ZipFile) {
 /// This function can return the following errors:
 /// * `ZcatError::IoError` - If there's an error opening the file
 /// * `ZcatError::ZipError` - If there's an error reading the ZIP archive or its entries
-fn handle_zip_entries(path: &PathBuf, handler: fn(zip::read::ZipFile) -> ()) -> Result<(), ZcatError> {
+fn handle_zip_entries(
+    path: &PathBuf,
+    handler: fn(zip::read::ZipFile) -> (),
+) -> Result<(), ZcatError> {
     let file = File::open(path).unwrap();
     let mut archive = zip::read::ZipArchive::new(file)?;
 
     for i in 0..archive.len() {
-        let file  = archive.by_index(i)?;
+        let file = archive.by_index(i)?;
         if file.is_dir() {
             continue;
         }
@@ -351,7 +392,10 @@ fn handle_zip_entries(path: &PathBuf, handler: fn(zip::read::ZipFile) -> ()) -> 
 /// This function can return:
 /// * `ZcatError::IoError` - If there's an error reading from the provided reader
 /// * `ZcatError::TarError` - If there's an error processing a tar archive
-fn extract_and_display_content<R>(file_path: &PathBuf, reader: R) -> Result<(), ZcatError> where R: Read {
+fn extract_and_display_content<R>(file_path: &PathBuf, reader: R) -> Result<(), ZcatError>
+where
+    R: Read,
+{
     let arr: Vec<&str> = file_path.to_str().unwrap().split(".").collect();
     let file_name = arr[..arr.len() - 1].join(".");
 
@@ -382,7 +426,10 @@ fn extract_and_display_content<R>(file_path: &PathBuf, reader: R) -> Result<(), 
 /// This function can return:
 /// * `ZcatError::IoError` - If there's an error reading from the provided reader
 /// * `ZcatError::TarError` - If there's an error processing a tar archive
-fn extract_and_display_info<R>(file_path: &PathBuf, mut reader: R) -> Result<(), ZcatError> where R: Read {
+fn extract_and_display_info<R>(file_path: &PathBuf, mut reader: R) -> Result<(), ZcatError>
+where
+    R: Read,
+{
     let arr: Vec<&str> = file_path.to_str().unwrap().split(".").collect();
     let file_name = arr[..arr.len() - 1].join(".");
 
@@ -398,47 +445,59 @@ fn extract_and_display_info<R>(file_path: &PathBuf, mut reader: R) -> Result<(),
     Ok(())
 }
 
-
 fn main() {
     let args = Args::parse();
+
+    CONTEXT.set(Context { with_styling: !args.no_styling }).unwrap();
 
     for file_path in args.files {
         let file_type = match infer_file_type(&file_path) {
             Ok(infer_output) => match infer_output {
                 Some(file_type) => &file_type.to_string(),
-                None => ""
+                None => "",
             },
             Err(_) => {
-                eprintln!("Could not infer the type of the following file: {:?}", file_path);
+                eprintln!(
+                    "Could not infer the type of the following file: {:?}",
+                    file_path
+                );
                 std::process::exit(1);
             }
         };
-   
+
         if args.list {
             println!("📂 {file_path:?}");
             let output = match file_type {
                 "application/zip" => handle_zip_entries(&file_path, print_zip_entry_info),
-                "application/x-tar" => handle_tar_entries(&file_path, print_tar_entry_info,),
+                "application/x-tar" => handle_tar_entries(&file_path, print_tar_entry_info),
                 "application/gzip" => {
                     let file = File::open(&file_path).unwrap();
                     let gz = GzDecoder::new(file);
                     extract_and_display_info(&file_path, gz)
-                },
+                }
                 "application/x-bzip2" => {
                     let file = File::open(&file_path).unwrap();
                     let bz = bzip2::read::BzDecoder::new(file);
                     extract_and_display_info(&file_path, bz)
-                },
-                _ =>  {
-                    let file_res = File::open(file_path.clone()).map_err(|err| ZcatError::IoError(err));
+                }
+                _ => {
+                    let file_res =
+                        File::open(file_path.clone()).map_err(|err| ZcatError::IoError(err));
                     file_res.map(|file| {
-                        display_file_info(&file_path.to_str().unwrap(), file.metadata().unwrap().size() as usize);
+                        display_file_info(
+                            &file_path.to_str().unwrap(),
+                            file.metadata().unwrap().len() as usize,
+                        );
                     })
                 }
             };
 
             if output.is_err() {
-                eprintln!("An error occurred while processing the file: {:?}. Error: {:?}", file_path, output.err().unwrap());
+                eprintln!(
+                    "An error occurred while processing the file: {:?}. Error: {:?}",
+                    file_path,
+                    output.err().unwrap()
+                );
                 std::process::exit(1);
             }
         } else {
@@ -449,24 +508,29 @@ fn main() {
                     let file = File::open(&file_path).unwrap();
                     let gz = GzDecoder::new(file);
                     extract_and_display_content(&file_path, gz)
-                },
+                }
                 "application/x-bzip2" => {
                     let file = File::open(&file_path).unwrap();
                     let bz = bzip2::read::BzDecoder::new(file);
                     extract_and_display_content(&file_path, bz)
-                },
+                }
                 _ => {
-                    let file_res = File::open(file_path.clone()).map_err(|err| ZcatError::IoError(err));
+                    let file_res =
+                        File::open(file_path.clone()).map_err(|err| ZcatError::IoError(err));
                     file_res.map(|file| {
                         display_file_content(
                             &file_path.clone().to_str().unwrap(),
-                            BufReader::new(file)
+                            BufReader::new(file),
                         )
-                    })             
+                    })
                 }
             };
             if output.is_err() {
-                eprintln!("An error occurred while processing the file: {:?}. Error: {:?}", file_path, output.err().unwrap());
+                eprintln!(
+                    "An error occurred while processing the file: {:?}. Error: {:?}",
+                    file_path,
+                    output.err().unwrap()
+                );
                 std::process::exit(1);
             }
         }
@@ -493,34 +557,40 @@ mod tests {
 
         // Test megabytes
         assert_eq!(format_file_size(1024 * 1024), "1.00 MB");
-        assert_eq!(format_file_size(1024 * 1024 * 3/2 as usize), "1.50 MB");
+        assert_eq!(format_file_size(1024 * 1024 * 3 / 2 as usize), "1.50 MB");
         assert_eq!(format_file_size(1024 * 1024 * 1024 - 1), "1024.00 MB");
 
         // Test gigabytes
         assert_eq!(format_file_size(1024 * 1024 * 1024), "1.00 GB");
         assert_eq!(format_file_size(1024 * 1024 * 1024 * 2), "2.00 GB");
-        
+
         // Test very large sizes (should cap at GB)
         assert_eq!(format_file_size(1024 * 1024 * 1024 * 1024), "1024.00 GB");
-        assert_eq!(format_file_size(1024 * 1024 * 1024 * 1024 * 5), "5120.00 GB");
-
+        assert_eq!(
+            format_file_size(1024 * 1024 * 1024 * 1024 * 5),
+            "5120.00 GB"
+        );
     }
 }
 
 #[cfg(test)]
 mod integration_tests {
-    use std::{fs::{self, File}, io::Write, os::unix::fs::MetadataExt, path::PathBuf};
+    use std::{
+        fs::{self, File},
+        io::Write,
+        path::PathBuf,
+    };
 
     use assert_cmd::Command;
     use flate2::write::GzEncoder;
     use predicates::prelude::PredicateBooleanExt;
-    use tempfile::TempDir;
     use predicates::prelude::*;
+    use tempfile::TempDir;
 
     const TEST_MESSAGE: &str = "Hello, World!\nThis is a test file.\n";
     const TAR_ARCHIVE_CONTENT: &[(&str, &str)] = &[
         ("file1.txt", "Content of file 1"),
-        ("file2.txt", "Content of file 2")
+        ("file2.txt", "Content of file 2"),
     ];
 
     const ZIP_TEST_FILES: &[(&str, &str)] = &[
@@ -541,7 +611,10 @@ mod integration_tests {
         file_path
     }
 
-    fn create_tar_with_encoder<W>(files: &[(&str, &str)], encoder: W) -> W where W: Write {
+    fn create_tar_with_encoder<W>(files: &[(&str, &str)], encoder: W) -> W
+    where
+        W: Write,
+    {
         let mut tar = tar::Builder::new(encoder);
 
         for (file_name, file_content) in files {
@@ -549,10 +622,11 @@ mod integration_tests {
             header.set_size(file_content.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
-            tar.append_data(&mut header, file_name, file_content.as_bytes()).unwrap();
+            tar.append_data(&mut header, file_name, file_content.as_bytes())
+                .unwrap();
         }
-       tar.finish().unwrap();
-       tar.into_inner().unwrap()
+        tar.finish().unwrap();
+        tar.into_inner().unwrap()
     }
 
     fn create_test_tar_gz(dir: &TempDir, name: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -589,8 +663,9 @@ mod integration_tests {
         let file_path = dir.path().join(name);
         let file = File::create(&file_path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
         for &(file_name, file_content) in files {
             zip.start_file(file_name, options).unwrap();
             zip.write_all(file_content.as_bytes()).unwrap();
@@ -603,7 +678,8 @@ mod integration_tests {
         let file_path = dir.path().join(name);
         let file = File::create(&file_path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
 
         zip.add_directory("empty_dir/", options).unwrap();
         zip.add_directory("nested/", options).unwrap();
@@ -613,21 +689,20 @@ mod integration_tests {
         zip.write_all(b"Nested file content\n").unwrap();
 
         zip.finish().unwrap();
-    
-        file_path
-    } 
 
+        file_path
+    }
 
     #[test]
     fn test_gz_file_content() {
         let temp_dir = TempDir::new().unwrap();
         let gz_path = create_test_gz_file(&temp_dir, "text.txt.gz", TEST_MESSAGE);
 
-        let assert = Command::cargo_bin("zcatr").unwrap()
-            .arg(gz_path)
-            .assert();
+        let assert = Command::cargo_bin("zcatr").unwrap().arg(gz_path).assert();
 
-        assert.success().stdout(predicates::str::contains(TEST_MESSAGE));
+        assert
+            .success()
+            .stdout(predicates::str::contains(TEST_MESSAGE));
     }
 
     #[test]
@@ -635,12 +710,16 @@ mod integration_tests {
         let temp_dir = TempDir::new().unwrap();
         let gz_path = create_test_gz_file(&temp_dir, "text.txt.gz", TEST_MESSAGE);
 
-        let assert = Command::cargo_bin("zcatr").unwrap()
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
             .arg("--list")
             .arg(gz_path)
             .assert();
 
-        assert.success().stdout(predicates::str::contains("text.txt")).stdout(predicates::str::contains("Bytes"));
+        assert
+            .success()
+            .stdout(predicates::str::contains("text.txt"))
+            .stdout(predicates::str::contains("Bytes"));
     }
 
     #[test]
@@ -648,21 +727,27 @@ mod integration_tests {
         let temp_dir = TempDir::new().unwrap();
         let tar_gz_path = create_test_tar_gz(&temp_dir, "test.tar.gz", TAR_ARCHIVE_CONTENT);
 
-        let assert = Command::cargo_bin("zcatr").unwrap().arg(tar_gz_path).assert();
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg(tar_gz_path)
+            .assert();
 
-        assert.success().stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[0].1)).stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[1].1));
+        assert
+            .success()
+            .stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[0].1))
+            .stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[1].1));
     }
 
     #[test]
-    fn test_tar_gz_info(){
+    fn test_tar_gz_info() {
         let temp_dir = TempDir::new().unwrap();
         let tar_gz_path = create_test_tar_gz(&temp_dir, "test.tar.gz", TAR_ARCHIVE_CONTENT);
 
         let assert = Command::cargo_bin("zcatr")
-        .unwrap()
-        .arg("--list")
-        .arg(tar_gz_path)
-        .assert();
+            .unwrap()
+            .arg("--list")
+            .arg(tar_gz_path)
+            .assert();
 
         assert
             .success()
@@ -674,11 +759,13 @@ mod integration_tests {
     #[test]
     fn test_non_existent_file() {
         let assert = Command::cargo_bin("zcatr")
-        .unwrap()
-        .arg("nonexistent.gz")
-        .assert();
+            .unwrap()
+            .arg("nonexistent.gz")
+            .assert();
 
-        assert.failure().stderr(predicates::str::contains("Could not infer the type of the following file"));
+        assert.failure().stderr(predicates::str::contains(
+            "Could not infer the type of the following file",
+        ));
     }
 
     #[test]
@@ -688,33 +775,44 @@ mod integration_tests {
 
         let assert = Command::cargo_bin("zcatr").unwrap().arg(bz2_path).assert();
 
-        assert.success().stdout(predicates::str::contains(TEST_MESSAGE));
+        assert
+            .success()
+            .stdout(predicates::str::contains(TEST_MESSAGE));
     }
-
 
     #[test]
     fn test_bz2_file_info() {
         let temp_dir = TempDir::new().unwrap();
         let bz2_path = create_test_bz2_file(&temp_dir, "text.txt.bz2", TEST_MESSAGE);
 
-        let assert = Command::cargo_bin("zcatr").unwrap()
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
             .arg("--list")
             .arg(bz2_path)
             .assert();
 
-        assert.success().stdout(predicates::str::contains("text.txt")).stdout(predicates::str::contains("Bytes"));
+        assert
+            .success()
+            .stdout(predicates::str::contains("text.txt"))
+            .stdout(predicates::str::contains("Bytes"));
     }
 
-    #[test] 
+    #[test]
     fn test_tar_bz2_content() {
         let temp_dir = TempDir::new().unwrap();
         let tar_bz2_path = create_test_tar_bz2_file(&temp_dir, "test.tar.bz2", TAR_ARCHIVE_CONTENT);
 
         println!("{:?}", tar_bz2_path);
 
-        let assert = Command::cargo_bin("zcatr").unwrap().arg(tar_bz2_path).assert();
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg(tar_bz2_path)
+            .assert();
 
-        assert.success().stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[0].1)).stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[1].1));
+        assert
+            .success()
+            .stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[0].1))
+            .stdout(predicates::str::contains(TAR_ARCHIVE_CONTENT[1].1));
     }
 
     #[test]
@@ -722,13 +820,11 @@ mod integration_tests {
         let temp_dir = TempDir::new().unwrap();
         let zip_path = create_test_zip(&temp_dir, "test.zip", ZIP_TEST_FILES);
 
-        let assert = Command::cargo_bin("zcatr")
-            .unwrap()
-            .arg(zip_path)
-            .assert();
+        let assert = Command::cargo_bin("zcatr").unwrap().arg(zip_path).assert();
 
         // Test specific content from each file type
-        assert.success()
+        assert
+            .success()
             // Plain text content
             .stdout(predicates::str::contains("This is a plain text file"))
             // Markdown content
@@ -749,13 +845,11 @@ mod integration_tests {
         let temp_dir = TempDir::new().unwrap();
         let zip_path = create_test_zip(&temp_dir, "test.zip", ZIP_TEST_FILES);
 
-        let assert = Command::cargo_bin("zcatr")
-            .unwrap()
-            .arg(zip_path)
-            .assert();
+        let assert = Command::cargo_bin("zcatr").unwrap().arg(zip_path).assert();
 
         // Verify file type recognition through header display
-        assert.success()
+        assert
+            .success()
             .stdout(predicates::str::contains("Content from \"document.txt\""))
             .stdout(predicates::str::contains("Content from \"readme.md\""))
             .stdout(predicates::str::contains("Content from \"data.csv\""))
@@ -768,7 +862,7 @@ mod integration_tests {
     fn test_zip_with_directories() {
         let temp_dir = TempDir::new().unwrap();
         let zip_path = create_test_zip_with_dirs(&temp_dir, "test_with_dirs.zip");
- 
+
         // Test listing mode
         let list_assert = Command::cargo_bin("zcatr")
             .unwrap()
@@ -776,21 +870,20 @@ mod integration_tests {
             .arg(&zip_path)
             .assert();
 
-        list_assert.success()
+        list_assert
+            .success()
             .stdout(predicates::str::contains("root_file.txt"))
             .stdout(predicates::str::contains("nested/nested_file.txt"))
             // Directory entries should be skipped
             .stdout(predicates::str::contains("empty_dir").not());
 
         // Test content mode
-        let content_assert = Command::cargo_bin("zcatr")
-            .unwrap()
-            .arg(&zip_path)
-            .assert();
+        let content_assert = Command::cargo_bin("zcatr").unwrap().arg(&zip_path).assert();
 
-        content_assert.success()
+        content_assert
+            .success()
             .stdout(predicates::str::contains("Root level file"))
-            .stdout(predicates::str::contains("Nested file content")); 
+            .stdout(predicates::str::contains("Nested file content"));
     }
 
     #[test]
@@ -798,14 +891,11 @@ mod integration_tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("corrupted.zip");
         let mut file = File::create(&file_path).unwrap();
-        
+
         // Write some random bytes that look like a ZIP but are invalid
         file.write_all(b"PK\x03\x04corrupted content").unwrap();
 
-        let assert = Command::cargo_bin("zcatr")
-            .unwrap()
-            .arg(file_path)
-            .assert();
+        let assert = Command::cargo_bin("zcatr").unwrap().arg(file_path).assert();
 
         assert.failure();
     }
@@ -840,11 +930,12 @@ mod integration_tests {
 
         // Add binary files (should not be previewable)
         zip.start_file("image.png", options).unwrap();
-        zip.write_all(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap(); // PNG header
-        
+        zip.write_all(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+            .unwrap(); // PNG header
+
         zip.start_file("binary.pdf", options).unwrap();
         zip.write_all(b"%PDF-1.5\n%\x82\x82").unwrap(); // PDF header
-        
+
         zip.start_file("program.exe", options).unwrap();
         zip.write_all(&[0x4D, 0x5A, 0x90, 0x00]).unwrap(); // EXE header
 
@@ -855,7 +946,8 @@ mod integration_tests {
             .arg(&file_path)
             .assert();
 
-        assert.success()
+        assert
+            .success()
             // Binary files should show no preview message
             .stdout(predicates::str::contains("Preview not available in console").count(3));
     }
@@ -865,14 +957,19 @@ mod integration_tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("dummy.txt");
         let dummy_text = "THIS IS A DUMMY TEXT";
-        File::create(file_path.clone()).unwrap().write_all(dummy_text.as_bytes()).unwrap();
+        File::create(file_path.clone())
+            .unwrap()
+            .write_all(dummy_text.as_bytes())
+            .unwrap();
 
         let assert = Command::cargo_bin("zcatr")
-        .unwrap()
-        .arg(&file_path.clone())
-        .assert();
+            .unwrap()
+            .arg(&file_path.clone())
+            .assert();
 
-        assert.success().stdout(predicates::str::contains(dummy_text));
+        assert
+            .success()
+            .stdout(predicates::str::contains(dummy_text));
 
         fs::remove_file(file_path).unwrap();
     }
@@ -886,14 +983,36 @@ mod integration_tests {
         file.write_all(dummy_text.as_bytes()).unwrap();
 
         let assert = Command::cargo_bin("zcatr")
-        .unwrap()
-        .arg("-l")
-        .arg(&file_path.clone())
-        .assert();
+            .unwrap()
+            .arg("-l")
+            .arg(&file_path.clone())
+            .assert();
 
-        assert.success().stdout(predicates::str::contains(format!("{} Bytes", file.metadata().unwrap().size())));
+        assert.success().stdout(predicates::str::contains(format!(
+            "{} Bytes",
+            file.metadata().unwrap().len()
+        )));
 
         fs::remove_file(file_path).unwrap();
     }
 
+
+    #[test]
+    fn test_it_should_not_display_header_and_footer_when_printing_file_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("dummy.txt");
+        let dummy_text = "THIS IS A DUMMY TEXT";
+        let mut file = File::create(file_path.clone()).unwrap();
+        file.write_all(dummy_text.as_bytes()).unwrap();
+
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg("--no-styling")
+            .arg(&file_path.clone())
+            .assert();
+
+        assert.success().stdout(predicates::str::contains("📄").not());
+
+        fs::remove_file(file_path).unwrap();
+    }
 }
