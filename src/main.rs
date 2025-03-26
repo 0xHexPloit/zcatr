@@ -187,6 +187,8 @@ where
         let mut cursor = std::io::Cursor::new(magic_bytes);
         read_bytes = cursor.read(&mut buffer).unwrap();
 
+
+
         // Stream the content
         loop {
             // Replacing cursor to avoid a UTF8 parsing error.
@@ -197,22 +199,25 @@ where
                 if inspected_byte >> 7 == 0x0 || inspected_byte >> 5 == 0x6 || inspected_byte >> 4 == 0xE || inspected_byte >> 3 == 30 {
                     break;
                 }
+
+                if right_ptr == 0 {
+                    return;
+                }
+
                 right_ptr -= 1;
             }
 
-            let str_res  = match inspected_byte >> 7 == 0 {
-                true => std::str::from_utf8(&buffer[..right_ptr+1]),
-                false => std::str::from_utf8(&buffer[..right_ptr]),
+            let range  = match inspected_byte >> 7 == 0 {
+                true => ..right_ptr+1,
+                false => ..right_ptr
             };
 
-            match str_res {
-                Ok(text) => {
-                    print!("{}", text);
-                },
-                Err(_) => {
-                    eprintln!("{}", UTF_8_PARSING_ERR_MESSAGE);
-                    break;
-                }
+            if let Ok(text) = std::str::from_utf8(&buffer[range]) {
+                print!("{}", text);
+            } else {
+                let str_lossy = String::from_utf8_lossy(&buffer[range]);
+                let filtered = str_lossy.split(LINE_ENDING).filter(|s| std::str::from_utf8(s.as_bytes()).is_ok()).collect::<Vec<&str>>().join(LINE_ENDING);
+                print!("{}", filtered);
             }
 
             let mut offset = 0;
