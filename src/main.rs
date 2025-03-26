@@ -19,8 +19,6 @@ const LINE_ENDING: &str = "\n";
 const MAGIC_BYTES_SIZE: usize = 512;
 const BUFFER_SIZE: usize = 8192;
 
-
-
 #[derive(Error, Debug)]
 enum ZcatError {
     #[error("I/O error: {0}")]
@@ -187,7 +185,9 @@ where
         let mut cursor = io::Cursor::new(magic_bytes);
         read_bytes = cursor.read(&mut buffer).unwrap();
 
-
+        if read_bytes == 0 {
+            return
+        }
 
         // Stream the content
         loop {
