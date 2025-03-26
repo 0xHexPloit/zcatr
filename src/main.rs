@@ -578,7 +578,6 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        println!()
     }
 }
 
@@ -1061,5 +1060,31 @@ mod integration_tests {
             .stdout(predicates::str::contains("📄").not());
 
         fs::remove_file(file_path).unwrap();
+    }
+
+
+    #[test]
+    fn test_it_should_mimic_how_the_cat_command_works() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("dummy.txt");
+        let dummy_text = "THIS IS A DUMMY TEXT\n";
+        let mut file = File::create(file_path.clone()).unwrap();
+        file.write_all(dummy_text.as_bytes()).unwrap();
+        let file_path_two = temp_dir.path().join("dummy2.txt");
+        let dummy_text_two = "THIS IS A SECOND DUMMY TEXT\n";
+        let mut file_two = File::create(file_path_two.clone()).unwrap();
+        file_two.write_all(dummy_text_two.as_bytes()).unwrap();
+
+        let assert = Command::cargo_bin("zcatr")
+            .unwrap()
+            .arg("--no-styling")
+            .arg(&file_path.clone())
+            .arg(&file_path_two.clone())
+            .assert();
+
+        assert.success().stdout(predicates::str::contains(format!("{}\n{}", dummy_text, dummy_text_two)));
+
+        fs::remove_file(file_path).unwrap();
+        fs::remove_file(file_path_two).unwrap();
     }
 }
